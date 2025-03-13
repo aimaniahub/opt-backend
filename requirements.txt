@@ -1,0 +1,7 @@
+Flask
+requests
+pandas
+werkzeug
+beautifulsoup4
+lxml
+gunicorn
