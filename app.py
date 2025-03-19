@@ -62,7 +62,7 @@ def get_fno_stocks():
             "ULTRACEMCO", "WIPRO", "HINDUNILVR", "ADANIENT", "TATASTEEL", "BAJAJFINSV"
         ]
 
-# Get F&O stocks list
+# Get F&O stocks list once at the start
 FNO_STOCKS = get_fno_stocks()
 
 # Combined list for dropdown
@@ -87,7 +87,6 @@ def get_current_price():
     
     try:
         # For demonstration, we'll use a simple API to get the current price
-        # In production, you should use a reliable market data API
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
@@ -221,257 +220,30 @@ def fetch_option_chain():
             # Get trades aligned with market direction, news sentiment, and sector trend
             sector_sentiment = 'Neutral'
             if market_news['success']:
-                sector_data = next((s for s in market_news.get('sector_analysis', {}).values() 
-                                  if symbol in s.get('stocks_mentioned', [])), None)
-                if sector_data:
-                    bullish = sector_data['bullish_count']
-                    bearish = sector_data['bearish_count']
-                    if bullish > bearish:
-                        sector_sentiment = 'Bullish'
-                    elif bearish > bullish:
-                        sector_sentiment = 'Bearish'
+                sector_sentiment = market_news['sector_sentiment']
             
-            aligned_trades = [t for t in high_potential_trades if 
-                            (t['type'] == 'CALL' and market_direction['bias'] == 'Bullish' and 
-                             news_data['overall_sentiment']['sentiment'] != 'Bearish' and
-                             sector_sentiment != 'Bearish') or
-                            (t['type'] == 'PUT' and market_direction['bias'] == 'Bearish' and 
-                             news_data['overall_sentiment']['sentiment'] != 'Bullish' and
-                             sector_sentiment != 'Bullish')]
-            
-            # Select top trade with fallback
-            top_trade = aligned_trades[0] if aligned_trades else high_potential_trades[0]
-            
-            # Add comprehensive recommendation
-            if top_trade:
-                news_context = f" News: {news_data['overall_sentiment']['summary']}"
-                sector_context = f" Sector: {sector} sentiment is {sector_sentiment}"
-                market_context = f" Market: {market_direction['bias']} with {market_direction['confidence']}% confidence"
-                
-                top_trade['recommendation'] = (
-                    f"BEST TRADE: {top_trade['type']} at strike ₹{top_trade['strike']}. "
-                    f"{market_context}.{sector_context}.{news_context}"
-                )
-        else:
-            # No high potential trades found
-            top_trade = {
-                'type': 'NONE',
-                'recommendation': 'No high-potential trades found',
-                'reason': 'Consider checking all available trades below'
-            }
+            high_potential_trades.append({
+                'type': 'SECTOR SENTIMENT',
+                'sentiment': sector_sentiment
+            })
         
-        # Prepare response with all available data
-        response = {
+        # Prepare results for front end
+        results = {
             'symbol': symbol,
             'current_price': current_price,
+            'option_chain_data': option_chain_data,
             'market_direction': market_direction,
-            'sector': sector,
-            'volume_signals': volume_signals or {'volume_signal': 'Neutral', 'reasons': []},
-            'volume_data': {
-                'inflow_ratio': volume_data.get('inflow_ratio', 0),
-                'outflow_ratio': volume_data.get('outflow_ratio', 0),
-                'delivery_percentage': volume_data.get('delivery_percentage', 0),
-                'signal': volume_signals.get('volume_signal', 'Neutral'),
-                'reasons': volume_signals.get('reasons', [])
-            } if volume_data else {},
-            'news_data': {
-                'stock_news': news_data.get('stock_news', []),
-                'market_mentions': news_data.get('market_mentions', []),
-                'overall_sentiment': news_data.get('overall_sentiment', {
-                    'sentiment': 'Neutral',
-                    'confidence': 'Low',
-                    'summary': 'No recent news available'
-                })
-            },
-            'market_context': {
-                'sector_sentiment': sector_sentiment,
-                'sector_stocks': market_news.get('sector_analysis', {}).get(sector, {}).get('stocks_mentioned', [])
-            } if market_news.get('success') else {},
-            'best_trade': top_trade,
-            'best_trades': best_trades or {'best_overall': [], 'best_atm': [], 'best_otm': []},
-            'imbalance_trades': imbalance_trades[:3] if imbalance_trades else [],
-            'all_trades': sorted(all_possible_trades, key=lambda x: abs(float(x['distance'].rstrip('%'))))
+            'high_potential_trades': high_potential_trades,
+            'volume_signals': volume_signals,
+            'volume_data': volume_data,
+            'news_data': news_data,
+            'market_news': market_news
         }
         
-        return jsonify(response)
-        
+        return jsonify(results)
+
     except Exception as e:
-        return jsonify({
-            'error': str(e),
-            'symbol': symbol,
-            'best_trade': {
-                'type': 'ERROR',
-                'recommendation': 'Failed to analyze trades',
-                'reason': str(e)
-            },
-            'news_data': {
-                'stock_news': [],
-                'market_mentions': [],
-                'overall_sentiment': {
-                    'sentiment': 'Neutral',
-                    'confidence': 'Low',
-                    'summary': 'Failed to fetch news'
-                }
-            },
-            'all_trades': []
-        }), 500
-
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded. Please upload a file from your device.'}), 400
-    
-    file = request.files['file']
-    current_price = request.form.get('currentPrice')
-    
-    if not current_price:
-        return jsonify({'error': 'Current price is required'}), 400
-    
-    try:
-        current_price = float(current_price)
-    except ValueError:
-        return jsonify({'error': 'Invalid current price value'}), 400
-    
-    if file.filename == '':
-        return jsonify({'error': 'No file selected. Please upload a file from your device.'}), 400
-    
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-        
-        try:
-            options = read_option_chain(filepath)
-            if not options:
-                return jsonify({'error': 'No valid data found in file'}), 400
-
-            market_direction = analyze_market_direction(options, current_price)
-            best_trades = analyze_best_trades(options, current_price)
-            imbalance_trades = analyze_price_imbalances(options, current_price)
-
-            # Clean up the uploaded file
-            os.remove(filepath)
-
-            # Find the absolute best trade based on scores
-            all_trades = []
-            if best_trades['best_overall']:
-                all_trades.extend(best_trades['best_overall'])
-            if best_trades['best_atm']:
-                all_trades.extend(best_trades['best_atm'])
-            if best_trades['best_otm']:
-                all_trades.extend(best_trades['best_otm'])
-            if imbalance_trades:
-                all_trades.extend(imbalance_trades[:2])
-                
-            all_trades.sort(key=lambda x: x['score'], reverse=True)
-            
-            # Get the top trade that aligns with market direction
-            aligned_trades = [t for t in all_trades if 
-                             (t['type'] == 'CALL' and market_direction['bias'] == 'Bullish') or
-                             (t['type'] == 'PUT' and market_direction['bias'] == 'Bearish')]
-            
-            # If we have aligned trades, prioritize them
-            top_trade = aligned_trades[0] if aligned_trades else all_trades[0] if all_trades else None
-            
-            # Add a clear recommendation if we have a top trade
-            if top_trade:
-                top_trade['recommendation'] = f"BEST TRADE: {top_trade['type']} at strike ₹{top_trade['strike']}"
-
-            return jsonify({
-                'current_price': current_price,
-                'market_direction': market_direction,
-                'best_trade': top_trade,
-                'best_trades': best_trades,
-                'imbalance_trades': imbalance_trades[:3]
-            })
-
-        except Exception as e:
-            return jsonify({'error': str(e)}), 500
-        
-    return jsonify({'error': 'Invalid file type'}), 400
-
-@app.route('/fetch_market_news', methods=['GET'])
-def fetch_market_news():
-    try:
-        # Fetch market news data
-        market_news = fetch_market_news()
-        
-        if not market_news['success']:
-            return jsonify({
-                'error': market_news.get('error', 'Failed to fetch market news'),
-                'news': [],
-                'stock_mentions': {},
-                'sector_analysis': {}
-            }), 500
-            
-        # Group news by sector for sector-specific analysis
-        sector_analysis = {}
-        for stock, mentions in market_news['stock_mentions'].items():
-            # Get the sector for the stock (you would need to maintain a sector mapping)
-            sector = get_stock_sector(stock)
-            if sector not in sector_analysis:
-                sector_analysis[sector] = {
-                    'bullish_count': 0,
-                    'bearish_count': 0,
-                    'neutral_count': 0,
-                    'stocks_mentioned': set()
-                }
-            
-            sector_analysis[sector]['stocks_mentioned'].add(stock)
-            for mention in mentions:
-                if mention['sentiment'] == 'Bullish':
-                    sector_analysis[sector]['bullish_count'] += 1
-                elif mention['sentiment'] == 'Bearish':
-                    sector_analysis[sector]['bearish_count'] += 1
-                else:
-                    sector_analysis[sector]['neutral_count'] += 1
-        
-        # Convert sets to lists for JSON serialization
-        for sector in sector_analysis:
-            sector_analysis[sector]['stocks_mentioned'] = list(sector_analysis[sector]['stocks_mentioned'])
-        
-        return jsonify({
-            'success': True,
-            'news': market_news['news'],
-            'stock_mentions': market_news['stock_mentions'],
-            'sector_analysis': sector_analysis,
-            'last_updated': market_news['last_updated']
-        })
-        
-    except Exception as e:
-        return jsonify({
-            'error': str(e),
-            'news': [],
-            'stock_mentions': {},
-            'sector_analysis': {}
-        }), 500
-
-def get_stock_sector(symbol: str) -> str:
-    """Get the sector for a given stock symbol."""
-    # This is a simplified sector mapping. In production, you would want to maintain
-    # a complete mapping or fetch it from a reliable source
-    sector_mapping = {
-        'RELIANCE': 'Oil & Gas',
-        'TCS': 'IT',
-        'INFY': 'IT',
-        'HDFCBANK': 'Banking',
-        'ICICIBANK': 'Banking',
-        'HDFC': 'Banking',
-        'KOTAKBANK': 'Banking',
-        'LT': 'Infrastructure',
-        'AXISBANK': 'Banking',
-        'SBIN': 'Banking',
-        'BHARTIARTL': 'Telecom',
-        'ITC': 'FMCG',
-        'HCLTECH': 'IT',
-        'TITAN': 'Consumer Goods',
-        'BAJFINANCE': 'Financial Services',
-        'ASIANPAINT': 'Chemicals',
-        'MARUTI': 'Auto',
-        'SUNPHARMA': 'Pharma',
-        'TATAMOTORS': 'Auto'
-    }
-    return sector_mapping.get(symbol, 'Others')
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))  # Use Render's PORT variable
